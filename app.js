@@ -1,3 +1,11 @@
+// app.js（全文）
+// 学校向け・インストール不要の音楽プレーヤー
+// - フォルダ選択→サブフォルダ＝種目→曲リスト化
+// - 10秒送り/戻し、リピート、停止は約4秒フェードアウト
+// - 再生速度 0.7〜1.3（ピッチ保持）
+// - WMA は再生不可→同名MP3が無ければ変換提案→ ffmpeg.wasm でMP3生成し同フォルダへ保存
+// - ffmpeg.wasm は UMD + toBlobURL + シングルスレッドコアで読み込み（COOP/COEP不要）
+
 // ===== 要素取得 =====
 const btnPickRoot = document.getElementById('pick-root');
 const sectionSelect = document.getElementById('section-select');
@@ -29,13 +37,12 @@ const speedButtons = Array.from(document.querySelectorAll('.spd'));
 const speedInd = document.getElementById('speed-ind');
 
 // 変換UI
-const convDialog = document.getElementById('conv-dialog');
-const convText = document.getElementById('conv-text');
-const convOk = document.getElementById('conv-ok');
+const convDialog  = document.getElementById('conv-dialog');
+const convText    = document.getElementById('conv-text');
 const convOverlay = document.getElementById('conv-progress');
-const convStatus = document.getElementById('conv-status');
+const convStatus  = document.getElementById('conv-status');
 
-// ===== 状態 =====
+// ===== 定数・状態 =====
 const EXT_TO_MIME = {
   'mp3':  'audio/mpeg',
   'm4a':  'audio/mp4',
@@ -55,7 +62,9 @@ let idx = -1;
 let repeating = false;
 let seeking = false;
 
-// フェード用
+let warnedUnsupportedOnce = false; // 未対応拡張子を初遭遇時に一度だけ警告
+
+// フェード用（Web Audio）
 let audioCtx = null;
 let mediaSrc = null;
 let gainNode = null;
@@ -66,7 +75,7 @@ const DEFAULT_FADE_SEC = 4.0;
 let ffmpeg = null;
 let ffmpegReady = false;
 
-// 自然順
+// 自然順ソート
 const coll = new Intl.Collator('ja-JP', { numeric: true, sensitivity: 'base' });
 const ncmp = (a, b) => coll.compare(a, b);
 
@@ -91,7 +100,14 @@ function canPlayByExt(ext) {
   } catch (_) { return false; }
 }
 
-// ピッチ保持
+// 未対応ファイルがあれば初回だけ案内（例：WMA）
+function warnUnsupportedOnce() {
+  if (warnedUnsupportedOnce) return;
+  warnedUnsupportedOnce = true;
+  alert('この端末のブラウザで再生できない音源が含まれていたため、リストから除外または変換提案を表示しています。\n（例：WMA は Chrome で未対応です。MP3/WAV を推奨）');
+}
+
+// ピッチ保持を有効化（ブラウザ差異を吸収）
 function enablePreservePitch() {
   try {
     if ('preservesPitch' in audio) audio.preservesPitch = true;
@@ -106,7 +122,7 @@ function setPlaybackRate(rate) {
   speedInd.textContent = `${Math.round(rate * 100)}%`;
 }
 
-// Media Session
+// Media Session（ロック画面・通知の操作）
 function setMediaSession(t){
   if (!('mediaSession' in navigator)) return;
   navigator.mediaSession.metadata = new MediaMetadata({
@@ -133,7 +149,7 @@ async function pickRootFolder(){
     return;
   }
   try{
-    const handle = await window.showDirectoryPicker();
+    const handle = await window.showDirectoryPicker(); // HTTPS必須
     rootHandle = handle;
     eventTitleEl.textContent = handle.name || '（不明）';
 
@@ -187,11 +203,8 @@ async function loadSectionByName(name){
 
 // ===== サブフォルダから曲を収集 =====
 async function collectTracksFromSection(sectionHandle, rootName, sectionName){
-  // 書き込み許可（変換で保存するため）
-  try{
-    const perm = await sectionHandle.requestPermission?.({ mode: 'readwrite' });
-    // perm が 'granted' でない場合も、後の保存時に再度要求します。
-  }catch(_){}
+  // 書き込み許可（後で変換保存する場合に備える）
+  try{ await sectionHandle.requestPermission?.({ mode: 'readwrite' }); }catch(_){}
 
   const files = [];
   const subdirs = [];
@@ -211,17 +224,19 @@ async function collectTracksFromSection(sectionHandle, rootName, sectionName){
     const ext = getExt(fe.name);
     const file = await fe.getFile();
     const playable = canPlayByExt(ext);
+    if (!playable && ext === 'wma') warnUnsupportedOnce();
+
     list.push({
       name: stripExt(file.name),
       url : playable ? URL.createObjectURL(file) : '',
       ext, file, playable,
-      handle: fe,                   // FileSystemFileHandle
+      handle: fe,
       parentDirHandle: sectionHandle,
       pathStr: `${rootName} / ${sectionName}`
     });
   }
 
-  // 小フォルダ：先頭の音源だけ（同名mp3が無ければWMAに変換提案）
+  // 小フォルダ：先頭の音源だけ（MP3優先）
   for (const de of subdirs){
     const innerFiles = [];
     for await (const ent of de.values()){
@@ -229,7 +244,6 @@ async function collectTracksFromSection(sectionHandle, rootName, sectionName){
     }
     innerFiles.sort((a,b)=>ncmp(a.name,b.name));
 
-    // MP3優先、次に他の再生可能拡張子、なければWMA等
     let chosen = innerFiles.find(h => getExt(h.name)==='mp3')
               || innerFiles.find(h => PLAYABLE_EXTS.includes(getExt(h.name)))
               || innerFiles[0];
@@ -238,18 +252,19 @@ async function collectTracksFromSection(sectionHandle, rootName, sectionName){
       const ext = getExt(chosen.name);
       const f = await chosen.getFile();
       const playable = canPlayByExt(ext);
+      if (!playable && ext === 'wma') warnUnsupportedOnce();
+
       list.push({
-        name: stripExt(de.name),     // フォルダ名を曲名に
+        name: stripExt(de.name),  // フォルダ名を曲名に
         url : playable ? URL.createObjectURL(f) : '',
         ext, file: f, playable,
         handle: chosen,
-        parentDirHandle: de,         // サブフォルダに保存
+        parentDirHandle: de,      // サブフォルダに保存
         pathStr: `${rootName} / ${sectionName} / ${de.name}`
       });
     }
   }
 
-  // 表示名の自然順
   list.sort((a,b)=>ncmp(a.name, b.name));
   return list;
 }
@@ -269,7 +284,7 @@ function renderList(items){
     mid.className = 'badge';
     mid.textContent = (t.ext || '').toUpperCase();
 
-    // 右：操作（WMA → 変換ボタン）
+    // 右：操作（WMA → 変換ボタン表示）
     const right = document.createElement('div');
     if (!t.playable && t.ext === 'wma') {
       const btn = document.createElement('button');
@@ -304,7 +319,7 @@ function setNowPlayingUI(t){
   albumEl.textContent  = t?.pathStr || '';
 }
 
-// ===== 再生系 =====
+// ===== 再生系（Web Audioでフェードアウト） =====
 function ensureAudioGraph(){
   if (audioCtx) return;
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -410,25 +425,33 @@ function stopPlaybackUI(){
 }
 
 // ===== 変換（WMA→MP3 同フォルダ保存） =====
+// GitHub Pages でも詰まらない読み込み方式：UMD + toBlobURL + シングルスレッド core
 async function ensureFfmpeg(){
   if (ffmpegReady) return;
+
   convOverlay.hidden = false;
-  convStatus.textContent = 'ffmpeg読込中…（初回のみ数十MB）';
-  // ESM を動的 import（CDNから読み込み）
-  const { createFFmpeg, fetchFile } = await import('https://unpkg.com/@ffmpeg/ffmpeg@0.12.6/dist/esm/index.js');
-  ffmpeg = createFFmpeg({
-    log: true,
-    corePath: 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/ffmpeg-core.js'
+  convStatus.textContent = 'ffmpeg読込中…（初回のみ約30MB）';
+
+  // UMDビルド＆ユーティリティ（toBlobURL）を動的 import
+  const [{ FFmpeg }, { toBlobURL }] = await Promise.all([
+    import('https://unpkg.com/@ffmpeg/ffmpeg@0.12.15/dist/umd/ffmpeg.js'),
+    import('https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js')
+  ]);
+
+  ffmpeg = new FFmpeg();
+  ffmpeg.on('log', ({ message }) => { if (message) convStatus.textContent = message; });
+  ffmpeg.on('progress', ({ progress }) => {
+    if (typeof progress === 'number') convStatus.textContent = `変換中… ${Math.round(progress*100)}%`;
   });
-  // 進捗を表示
-  ffmpeg.setLogger(({ message })=>{
-    if (message) convStatus.textContent = message;
-  });
-  ffmpeg.setProgress(({ ratio })=>{
-    if (ratio) convStatus.textContent = `変換中… ${Math.round(ratio*100)}%`;
-  });
-  await ffmpeg.load();
-  ffmpeg.fetchFile = fetchFile;
+
+  // シングルスレッド版 core（-mt ではない）を Blob URL 化して読み込む
+  const baseURL   = 'https://unpkg.com/@ffmpeg/core@0.12.15/dist/umd';
+  const coreURL   = await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript');
+  const wasmURL   = await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm');
+  const workerURL = await toBlobURL(`${baseURL}/ffmpeg-core.worker.js`, 'text/javascript');
+
+  await ffmpeg.load({ coreURL, wasmURL, workerURL });
+
   ffmpegReady = true;
   convOverlay.hidden = true;
 }
@@ -439,14 +462,12 @@ async function confirmConvert(trackIndex){
   const t = tracks[trackIndex];
   if (!t || t.ext !== 'wma') return;
 
-  // 同名mp3の存在確認
   const base = stripExt(t.handle.name);
   const mp3Name = `${base}.mp3`;
+
+  // 同名mp3の存在確認
   let mp3Exists = false;
-  try{
-    await t.parentDirHandle.getFileHandle(mp3Name);
-    mp3Exists = true;
-  }catch(_){}
+  try{ await t.parentDirHandle.getFileHandle(mp3Name); mp3Exists = true; }catch(_){}
 
   if (mp3Exists){
     alert(`同じフォルダに「${mp3Name}」が既にあります。変換は不要です。`);
@@ -458,7 +479,7 @@ async function confirmConvert(trackIndex){
   convertTargetIndex = trackIndex;
   convDialog.showModal();
 
-  // OK が押されたら変換開始
+  // OKで変換開始
   convDialog.addEventListener('close', async ()=>{
     if (convDialog.returnValue === 'ok' && convertTargetIndex === trackIndex){
       await convertAndSave(trackIndex);
@@ -479,22 +500,21 @@ async function convertAndSave(trackIndex){
     }
   }catch(_){}
 
-  // ffmpeg.wasm 読み込み
   await ensureFfmpeg();
 
   convOverlay.hidden = false;
   convStatus.textContent = 'ファイルを読み込み中…';
 
-  // FFmpeg仮想FSに入力配置
-  const inputName = 'input.wma';
+  // FFmpeg 仮想FSへ入力配置
+  const inputName  = 'input.wma';
   const outputName = 'output.mp3';
   const data = await t.file.arrayBuffer();
-  ffmpeg.FS('writeFile', inputName, new Uint8Array(data));
+  ffmpeg.writeFile(inputName, new Uint8Array(data));
 
-  // 変換（可変ビットレート -q:a 2 ≒ 高音質）
+  // 変換（VBR高音質 -q:a 2）
   convStatus.textContent = '変換中…';
   try{
-    await ffmpeg.run('-i', inputName, '-c:a', 'libmp3lame', '-q:a', '2', outputName);
+    await ffmpeg.exec(['-i', inputName, '-c:a', 'libmp3lame', '-q:a', '2', outputName]);
   }catch(err){
     convOverlay.hidden = true;
     alert('変換に失敗しました。WMAの種類によっては変換できない場合があります。');
@@ -502,11 +522,10 @@ async function convertAndSave(trackIndex){
     return;
   }
 
-  // 出力取得
+  // 出力取得→同名mp3で保存
   convStatus.textContent = '保存中…';
-  const out = ffmpeg.FS('readFile', outputName);
+  const out = await ffmpeg.readFile(outputName);
 
-  // 同名mp3として保存
   const base = stripExt(t.handle.name);
   const mp3Name = `${base}.mp3`;
   const mp3Handle = await t.parentDirHandle.getFileHandle(mp3Name, { create: true });
@@ -516,7 +535,7 @@ async function convertAndSave(trackIndex){
 
   convOverlay.hidden = true;
 
-  // プレイリストを更新：このトラックをMP3に差し替え
+  // プレイリスト差し替え
   const mp3File = await mp3Handle.getFile();
   t.ext = 'mp3';
   t.file = mp3File;
@@ -525,7 +544,6 @@ async function convertAndSave(trackIndex){
   t.handle = mp3Handle;
 
   renderList(tracks);
-  // 変換した曲を再生位置に
   const i = tracks.indexOf(t);
   if (i >= 0) playIndex(i);
 
@@ -573,7 +591,7 @@ speedButtons.forEach(btn=>{
 });
 setPlaybackRate(1.0);
 
-// キー操作
+// キー操作：Space=再生/一時停止、←/→=曲移動、[/]=±10秒、S=停止フェード、+/-=速度
 document.addEventListener('keydown', (e)=>{
   if (e.code === 'Space'){ e.preventDefault(); audio.paused ? play() : pause(); }
   else if (e.key === 'ArrowRight'){ next(); }
