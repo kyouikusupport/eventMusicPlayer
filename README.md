@@ -1,5 +1,4 @@
-# eventMusicPlayer
-# 運動会 Web プレーヤー（ChromeOS対応）
+# eventMusicPlayer（ChromeOS対応）
 
 共有ドライブに配置した音楽フォルダを階層的に読み取り、**インストール不要なWEBアプリ**として再生するプレーヤーです。
 
