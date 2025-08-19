@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>運動会プレーヤー（インストール不要）</title>
+  <meta name="color-scheme" content="light dark">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="bar">
+    <h1>運動会プレーヤー</h1>
+    <div class="info">
+      <div>タイトル：<span id="event-title">—</span></div>
+      <div>種　目：<span id="event-section">—</span></div>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="pickers">
+      <button id="pick-root" class="primary">「2025運動会」フォルダを選択</button>
+      <label class="select-wrap" title="サブフォルダ（種目）を選択">
+        種目：
+        <select id="section-select" disabled></select>
+      </label>
+      <span class="hint">
+        例：<code>2025運動会/02_はじめの体操/入場曲.mp3, ラジオ体操.wma, 退場曲.wav</code><br>
+        WMA は再生不可のため、必要に応じて MP3 に変換できます（同フォルダへ保存）。
+      </span>
+    </section>
+
+    <section class="player card">
+      <div class="now-playing">
+        <div class="meta">
+          <div id="title" class="title">—</div>
+          <div class="sub">
+            <span id="artist">—</span>
+            <span id="album" class="muted"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="controls">
+        <button id="prev" title="前の曲">⏮</button>
+        <button id="rew10" title="10秒戻す">-10s</button>
+        <button id="play" title="再生">▶</button>
+        <button id="pause" title="一時停止" hidden>⏸</button>
+        <button id="stop" title="停止（約4秒でフェードアウト）">⏹</button>
+        <button id="ff10" title="10秒進める">+10s</button>
+        <button id="next" title="次の曲">⏭</button>
+        <button id="repeat" title="ループ">🔁</button>
+      </div>
+
+      <div class="speed">
+        <div class="speed-label">再生速度（ピッチ保持）</div>
+        <div class="speed-buttons" role="group" aria-label="再生速度">
+          <button class="spd" data-rate="1.3">130%</button>
+          <button class="spd" data-rate="1.2">120%</button>
+          <button class="spd" data-rate="1.1">110%</button>
+          <button class="spd active" data-rate="1.0">100%</button>
+          <button class="spd" data-rate="0.9">90%</button>
+          <button class="spd" data-rate="0.8">80%</button>
+          <button class="spd" data-rate="0.7">70%</button>
+        </div>
+        <div class="speed-indicator">現在：<span id="speed-ind">100%</span></div>
+      </div>
+
+      <div class="seek">
+        <input id="seek" type="range" min="0" max="1000" value="0">
+        <div class="time">
+          <span id="cur">00:00</span> / <span id="dur">00:00</span>
+        </div>
+      </div>
+
+      <div class="volume">
+        音量 <input id="vol" type="range" min="0" max="1" step="0.01" value="1">
+      </div>
+
+      <audio id="audio" preload="metadata" crossorigin="anonymous"></audio>
+    </section>
+
+    <section class="playlist card">
+      <h2>リスト</h2>
+      <ul id="file-list" aria-label="選択中の種目の曲リスト"></ul>
+    </section>
+  </main>
+
+  <!-- 変換の確認ダイアログ -->
+  <dialog id="conv-dialog">
+    <form method="dialog">
+      <p id="conv-text">このWMAをMP3に変換して同じフォルダに保存しますか？</p>
+      <menu>
+        <button value="cancel">キャンセル</button>
+        <button id="conv-ok" value="ok">変換する</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <!-- 進捗表示（変換中） -->
+  <div id="conv-progress" hidden>
+    <div class="spinner"></div>
+    <div><span id="conv-status">準備中…</span></div>
+  </div>
+
+  <footer class="bar sub">
+    <small>WMAは再生不可→必要に応じ変換。速度変更はピッチ保持。停止は約4秒フェード。</small>
+  </footer>
+
+  <script src="./app.js" type="module"></script>
+</body>
+</html>
